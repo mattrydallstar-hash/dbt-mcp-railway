@@ -165,66 +165,12 @@ def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
 
     _orig_init(self, *args, **kwargs)
 
-    # 3. Register the /admin/users route on this FastMCP instance.
-    _register_admin_routes(self)
+    # 3. Register the admin web app + API routes on this FastMCP instance.
+    from admin import register_admin_routes  # local import: admin.py sits next to entrypoint.py
+    register_admin_routes(self, lambda: _verifier_singleton)
 
 
 FastMCP.__init__ = _patched_init  # type: ignore[assignment]
-
-
-# ─── Admin endpoint ──────────────────────────────────────────────────────────
-
-def _register_admin_routes(mcp: FastMCP) -> None:
-    """Attach /admin/users to this FastMCP instance.
-
-    Gated by MCP_ADMIN_KEY (a separate bearer token from the user keys).
-    If MCP_ADMIN_KEY is unset, the endpoint 404s — no admin surface.
-
-    Query param ?reveal_keys=1 includes the full keys in the response;
-    otherwise only the first-8-char prefix is returned.
-    """
-
-    admin_key_env = "MCP_ADMIN_KEY"
-
-    @mcp.custom_route("/admin/users", methods=["GET"], include_in_schema=False)
-    async def admin_users(request: Request) -> JSONResponse:
-        admin_key = os.environ.get(admin_key_env)
-        if not admin_key:
-            return JSONResponse(
-                {"error": "admin endpoint disabled (MCP_ADMIN_KEY not set)"},
-                status_code=404,
-            )
-
-        auth_header = request.headers.get("authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return JSONResponse(
-                {"error": "missing Bearer token"}, status_code=401
-            )
-        provided = auth_header.removeprefix("Bearer ").strip()
-        if provided != admin_key:
-            return JSONResponse(
-                {"error": "invalid admin token"}, status_code=403
-            )
-
-        if _verifier_singleton is None:
-            return JSONResponse(
-                {
-                    "warning": "Server running open — no user keys configured.",
-                    "users": [],
-                }
-            )
-
-        reveal = request.query_params.get("reveal_keys") in ("1", "true", "yes")
-        return JSONResponse(
-            {
-                "users": _verifier_singleton.get_stats(include_keys=reveal),
-                "note": (
-                    "Use ?reveal_keys=1 to include full bearer tokens."
-                    if not reveal
-                    else "Full bearer tokens included — handle with care."
-                ),
-            }
-        )
 
 
 def main() -> None:

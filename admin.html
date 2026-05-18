@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>dbt MCP — User Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --danger: #f87171;
+    --warn: #fbbf24;
+    --ok: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 24px;
+    min-height: 100vh;
+  }
+  .container { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 8px; font-weight: 600; }
+  .subtitle { color: var(--muted); margin-bottom: 24px; font-size: 14px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .panel h2 { font-size: 16px; margin: 0 0 16px; font-weight: 600; }
+  input[type=text], input[type=password] {
+    background: #0f172a;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 14px;
+    width: 100%;
+    font-family: inherit;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    background: var(--accent);
+    color: #0f172a;
+    border: 0;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.danger { background: var(--danger); color: #fff; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left;
+    padding: 12px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+  }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); }
+  td.actions { text-align: right; white-space: nowrap; }
+  td.actions button { padding: 6px 10px; font-size: 12px; margin-left: 6px; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row > input { flex: 1; }
+  .toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    max-width: 480px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    z-index: 100;
+  }
+  .toast.warn { border-color: var(--warn); }
+  .toast.ok { border-color: var(--ok); }
+  .toast.err { border-color: var(--danger); }
+  .key-display {
+    background: #0f172a;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: ui-monospace, monospace;
+    font-size: 13px;
+    word-break: break-all;
+    margin: 8px 0;
+  }
+  .small { font-size: 12px; color: var(--muted); }
+  .login-panel { max-width: 420px; margin: 80px auto; }
+  .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; display: block; }
+  #connection-snippet {
+    background: #0f172a;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    word-break: break-all;
+    margin-top: 8px;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div id="login" class="login-panel panel" style="display:none">
+    <h1>dbt MCP Admin</h1>
+    <p class="subtitle">Enter the admin key to manage user access.</p>
+    <label class="label">Admin key</label>
+    <input id="admin-key" type="password" placeholder="MCP_ADMIN_KEY value" />
+    <div style="margin-top: 12px">
+      <button onclick="login()">Unlock</button>
+    </div>
+    <p class="small" style="margin-top: 16px">
+      This page never stores your admin key on a server. It only lives in
+      this browser tab's session storage.
+    </p>
+  </div>
+
+  <div id="main" style="display:none">
+    <h1>dbt MCP — Users</h1>
+    <p class="subtitle">
+      Each user has a unique bearer token they paste into their Claude
+      config. Changes here update Railway and trigger an auto-redeploy
+      (~30s before the change is live).
+    </p>
+
+    <div class="panel">
+      <h2>Add user</h2>
+      <div class="row">
+        <input id="new-user-name" type="text" placeholder="username (alphanumeric + _-.)" />
+        <button onclick="addUser()">Create</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Current users</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Key prefix</th>
+            <th>Calls</th>
+            <th>Last seen (UTC)</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="users-body">
+          <tr><td colspan="5" class="small">Loading…</td></tr>
+        </tbody>
+      </table>
+      <p class="small" style="margin-top: 12px">
+        Call counts reset on each container restart. They're useful as a
+        "who's actively using this" signal, not a durable audit log.
+      </p>
+    </div>
+
+    <div style="text-align: right">
+      <button class="ghost" onclick="logout()">Sign out</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const SS_KEY = "dbt-mcp-admin-key";
+const MCP_URL = window.location.origin + "/mcp";
+
+function getKey() { return sessionStorage.getItem(SS_KEY); }
+function setKey(k) { sessionStorage.setItem(SS_KEY, k); }
+function clearKey() { sessionStorage.removeItem(SS_KEY); }
+
+async function api(method, path, body) {
+  const headers = { "Authorization": "Bearer " + getKey() };
+  if (body) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status });
+  return data;
+}
+
+function show(el) { document.getElementById(el).style.display = "block"; }
+function hide(el) { document.getElementById(el).style.display = "none"; }
+
+function toast(message, kind = "ok", durationMs = 4000) {
+  const t = document.createElement("div");
+  t.className = "toast " + kind;
+  t.innerHTML = message;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), durationMs);
+}
+
+function showKeyOnce(user, key) {
+  const snippet = `claude mcp add --transport http dbt-sl ${MCP_URL} --header "Authorization: Bearer ${key}"`;
+  const wrap = document.createElement("div");
+  wrap.className = "toast warn";
+  wrap.style.maxWidth = "640px";
+  wrap.innerHTML = `
+    <strong>Key for ${user}</strong>
+    <p class="small" style="margin: 4px 0 8px">Save this now — it won't be shown again.</p>
+    <div class="key-display">${key}</div>
+    <p class="small" style="margin: 12px 0 4px">Connection one-liner to share with ${user}:</p>
+    <div id="connection-snippet">${snippet}</div>
+    <div style="margin-top: 12px; text-align: right">
+      <button class="ghost" onclick="navigator.clipboard.writeText('${key}'); toast('Key copied', 'ok', 2000)">Copy key</button>
+      <button class="ghost" onclick="navigator.clipboard.writeText(\`${snippet}\`); toast('Snippet copied', 'ok', 2000)">Copy snippet</button>
+      <button onclick="this.closest('.toast').remove()">Close</button>
+    </div>`;
+  document.body.appendChild(wrap);
+}
+
+async function refresh() {
+  const tbody = document.getElementById("users-body");
+  try {
+    const { users } = await api("GET", "/admin/api/users");
+    if (!users || users.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="small">No users yet — add one above.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = users.map(u => `
+      <tr>
+        <td><strong>${u.user}</strong></td>
+        <td class="mono">${u.key_prefix}</td>
+        <td>${u.calls}</td>
+        <td class="small">${u.last_seen || "never"}</td>
+        <td class="actions">
+          <button class="ghost" onclick="rotate('${u.user}')">Regenerate</button>
+          <button class="danger" onclick="del('${u.user}')">Delete</button>
+        </td>
+      </tr>`).join("");
+  } catch (e) {
+    if (e.status === 401 || e.status === 403) {
+      clearKey();
+      hide("main"); show("login");
+      toast("Session expired — sign in again", "err");
+      return;
+    }
+    tbody.innerHTML = `<tr><td colspan="5" class="small" style="color: var(--danger)">${e.message}</td></tr>`;
+  }
+}
+
+async function addUser() {
+  const input = document.getElementById("new-user-name");
+  const name = input.value.trim();
+  if (!name) return;
+  try {
+    const { key } = await api("POST", "/admin/api/users", { name });
+    input.value = "";
+    showKeyOnce(name, key);
+    await refresh();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+async function rotate(name) {
+  if (!confirm(`Regenerate key for "${name}"? The old key will stop working in ~30 seconds.`)) return;
+  try {
+    const { key } = await api("POST", `/admin/api/users/${encodeURIComponent(name)}/rotate`);
+    showKeyOnce(name, key);
+    await refresh();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+async function del(name) {
+  if (!confirm(`Delete user "${name}"? Their key will stop working in ~30 seconds.`)) return;
+  try {
+    await api("DELETE", `/admin/api/users/${encodeURIComponent(name)}`);
+    toast(`Deleted ${name}`, "ok");
+    await refresh();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+function login() {
+  const k = document.getElementById("admin-key").value.trim();
+  if (!k) return;
+  setKey(k);
+  document.getElementById("admin-key").value = "";
+  hide("login"); show("main");
+  refresh();
+}
+
+function logout() {
+  clearKey();
+  hide("main"); show("login");
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  if (getKey()) {
+    show("main");
+    refresh();
+  } else {
+    show("login");
+  }
+});
+</script>
+
+</body>
+</html>
