@@ -20,3 +20,5 @@ DBT_USER_ID=<your user ID from dbt Cloud profile URL>
 ## Bumping the dbt-mcp version
 
 Edit the pinned version in `Dockerfile`, commit, push. Railway redeploys.
+
+# trigger rebuild 1779074306
