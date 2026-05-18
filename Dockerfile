@@ -12,12 +12,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 # Pin the version we tested against. Bump as new dbt-mcp releases drop.
 RUN pip install --no-cache-dir 'dbt-mcp==1.19.1'
 
+# Wrapper that monkey-patches FastMCP.__init__ to honor FASTMCP_HOST /
+# FASTMCP_PORT env vars (the SDK currently ignores them on construction,
+# so dbt-mcp would otherwise bind to 127.0.0.1 — unreachable from
+# Railway's proxy).
+COPY entrypoint.py /app/entrypoint.py
+
 # Run as non-root for hygiene
 RUN useradd -m -u 1000 appuser
 USER appuser
 
-# Railway expects the service to listen on $PORT. We pass it through; the
-# MCP server reads it (along with MCP_TRANSPORT=streamable-http) from env.
 EXPOSE 8000
 
-ENTRYPOINT ["dbt-mcp"]
+ENTRYPOINT ["python", "/app/entrypoint.py"]
