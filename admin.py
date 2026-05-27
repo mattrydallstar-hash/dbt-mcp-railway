@@ -75,7 +75,7 @@ class RailwayClient:
                     "environmentId": self.env_id,
                     "serviceId": self.service_id,
                 }},
-                headers={"Authorization": f"Bearer {self.token}"},
+                headers={"Project-Access-Token": self.token},
             )
         r.raise_for_status()
         data = r.json()["data"]["variables"]
@@ -107,7 +107,7 @@ class RailwayClient:
                         "replace": False,
                     }},
                 },
-                headers={"Authorization": f"Bearer {self.token}"},
+                headers={"Project-Access-Token": self.token},
             )
         r.raise_for_status()
         result = r.json()
