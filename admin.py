@@ -82,6 +82,8 @@ class TokenDB:
                            display_name,
                            role_label,
                            active,
+                           vault_data_enabled,
+                           dbt_mcp_enabled,
                            created_at,
                            last_used_at,
                            notes,
@@ -134,6 +136,8 @@ class TokenDB:
         display_name: str | None,
         role_label: str,
         notes: str | None,
+        vault_data_enabled: bool = True,
+        dbt_mcp_enabled: bool = True,
     ) -> str:
         """Insert a new user. Returns the freshly generated token."""
         if self.find_active(email):
@@ -144,10 +148,14 @@ class TokenDB:
                 cur.execute(
                     """
                     INSERT INTO mcp_user_tokens
-                        (token, email, display_name, role_label, notes, active)
-                    VALUES (%s, %s, %s, %s, %s, TRUE)
+                        (token, email, display_name, role_label, notes, active,
+                         vault_data_enabled, dbt_mcp_enabled)
+                    VALUES (%s, %s, %s, %s, %s, TRUE, %s, %s)
                     """,
-                    (token, email, display_name, role_label, notes),
+                    (
+                        token, email, display_name, role_label, notes,
+                        vault_data_enabled, dbt_mcp_enabled,
+                    ),
                 )
         return token
 
@@ -223,11 +231,15 @@ class TokenDB:
         display_name: str | None = None,
         role_label: str | None = None,
         notes: str | None = None,
+        vault_data_enabled: bool | None = None,
+        dbt_mcp_enabled: bool | None = None,
     ) -> None:
-        """Patch the display_name / role_label / notes of an active user.
+        """Patch user fields. None = leave unchanged.
 
-        None means "leave unchanged" (vs explicit empty string which clears
-        a nullable column).
+        Settable: display_name, role_label, notes, vault_data_enabled,
+        dbt_mcp_enabled. The two enabled flags can be flipped on revoked
+        users too (active flag controls account-wide, the two enabled
+        flags control per-MCP).
         """
         sets, params = [], []
         if display_name is not None:
@@ -239,21 +251,30 @@ class TokenDB:
         if notes is not None:
             sets.append("notes = %s")
             params.append(notes)
+        if vault_data_enabled is not None:
+            sets.append("vault_data_enabled = %s")
+            params.append(vault_data_enabled)
+        if dbt_mcp_enabled is not None:
+            sets.append("dbt_mcp_enabled = %s")
+            params.append(dbt_mcp_enabled)
         if not sets:
             return
         params.append(email)
+        # Note: we deliberately don't filter on `active` here. An admin
+        # may want to pre-stage flags on a revoked user before
+        # reactivating, or flip toggles on an active user.
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     UPDATE mcp_user_tokens
                     SET {", ".join(sets)}
-                    WHERE email = %s AND active
+                    WHERE email = %s
                     """,
                     tuple(params),
                 )
                 if cur.rowcount == 0:
-                    raise ValueError(f"no active user '{email}' to update")
+                    raise ValueError(f"no user '{email}' to update")
 
     def hard_delete(self, email: str) -> None:
         """Permanently remove the row. Loses the audit history — use revoke
@@ -361,9 +382,17 @@ def register_admin_routes(mcp: FastMCP) -> None:
 
         display_name = (payload.get("display_name") or "").strip() or None
         notes = (payload.get("notes") or "").strip() or None
+        # Per-MCP toggles default to TRUE (matches schema default) but the
+        # admin can explicitly disable one on creation.
+        vd_enabled = bool(payload.get("vault_data_enabled", True))
+        dbt_enabled = bool(payload.get("dbt_mcp_enabled", True))
 
         try:
-            token = db.create_user(email, display_name, role, notes)
+            token = db.create_user(
+                email, display_name, role, notes,
+                vault_data_enabled=vd_enabled,
+                dbt_mcp_enabled=dbt_enabled,
+            )
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=409)
         except Exception as e:
@@ -461,6 +490,13 @@ def register_admin_routes(mcp: FastMCP) -> None:
         dn = payload.get("display_name")
         role = payload.get("role_label")
         notes = payload.get("notes")
+        # Per-MCP toggles. Accept either bool or omitted.
+        vd_enabled = payload.get("vault_data_enabled")
+        dbt_enabled = payload.get("dbt_mcp_enabled")
+        if vd_enabled is not None:
+            vd_enabled = bool(vd_enabled)
+        if dbt_enabled is not None:
+            dbt_enabled = bool(dbt_enabled)
 
         if role is not None:
             try:
@@ -474,6 +510,8 @@ def register_admin_routes(mcp: FastMCP) -> None:
                 display_name=dn,
                 role_label=role,
                 notes=notes,
+                vault_data_enabled=vd_enabled,
+                dbt_mcp_enabled=dbt_enabled,
             )
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=404)

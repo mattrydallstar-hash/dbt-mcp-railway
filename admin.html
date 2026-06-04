@@ -117,6 +117,45 @@
     color: var(--accent);
     margin-left: 6px;
   }
+  /* Click-to-toggle per-MCP pill */
+  .toggle-pill {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    margin-right: 6px;
+    border: 1px solid transparent;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: 0.3px;
+  }
+  .toggle-pill.on  { background: rgba(74, 222, 128, 0.15); color: var(--ok);     border-color: rgba(74, 222, 128, 0.3); }
+  .toggle-pill.off { background: rgba(148, 163, 184, 0.1); color: var(--muted); border-color: var(--border); }
+  .toggle-pill:hover { opacity: 0.85; }
+  .toggle-pill.disabled-row { cursor: not-allowed; opacity: 0.5; }
+  .access-cell { white-space: nowrap; }
+  /* Checkbox row in forms */
+  .checkbox-row {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    padding: 8px 0;
+  }
+  .checkbox-row label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .checkbox-row input[type=checkbox] {
+    width: auto;
+    margin: 0;
+    cursor: pointer;
+  }
   .small { font-size: 12px; color: var(--muted); }
   .toast {
     position: fixed;
@@ -257,6 +296,19 @@
           <label class="label">Notes (optional)</label>
           <input id="new-notes" type="text" placeholder="e.g. board access, pilot user" />
         </div>
+        <div class="full">
+          <label class="label">MCP access (defaults to both on)</label>
+          <div class="checkbox-row">
+            <label>
+              <input type="checkbox" id="new-vd-enabled" checked />
+              vault-data /mcp (raw SQL)
+            </label>
+            <label>
+              <input type="checkbox" id="new-dbt-enabled" checked />
+              dbt-mcp (Semantic Layer)
+            </label>
+          </div>
+        </div>
         <div class="full" style="text-align: right">
           <button onclick="addUser()">Create &amp; show token</button>
         </div>
@@ -279,13 +331,14 @@
             <th>Name / Role</th>
             <th>Token</th>
             <th>Status</th>
+            <th>MCP access</th>
             <th>Last used</th>
             <th>Created</th>
             <th></th>
           </tr>
         </thead>
         <tbody id="users-body">
-          <tr><td colspan="7" class="small">Loading…</td></tr>
+          <tr><td colspan="8" class="small">Loading…</td></tr>
         </tbody>
       </table>
       <p class="small" style="margin-top: 12px">
@@ -325,6 +378,19 @@
       <div class="full">
         <label class="label">Notes</label>
         <textarea id="edit-notes"></textarea>
+      </div>
+      <div class="full">
+        <label class="label">MCP access</label>
+        <div class="checkbox-row">
+          <label>
+            <input type="checkbox" id="edit-vd-enabled" />
+            vault-data /mcp (raw SQL)
+          </label>
+          <label>
+            <input type="checkbox" id="edit-dbt-enabled" />
+            dbt-mcp (Semantic Layer)
+          </label>
+        </div>
       </div>
     </div>
     <div class="actions">
@@ -420,10 +486,17 @@ async function refresh() {
       (showRevoked ? "" : ` (+${users.length - filtered.length} revoked hidden)`);
 
     if (!filtered.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="small">No users — add one above.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="small">No users — add one above.</td></tr>`;
       return;
     }
-    tbody.innerHTML = filtered.map(u => `
+    tbody.innerHTML = filtered.map(u => {
+      const emailEnc = encodeURIComponent(u.email);
+      // Toggles disabled on revoked rows since the token won't auth anyway
+      // (active=false fails the gate before vault_data_enabled/dbt_mcp_enabled).
+      const disabledCls = u.active ? "" : " disabled-row";
+      const vdClickable = u.active ? `onclick="toggleAccess('${emailEnc}', 'vault_data_enabled', ${!u.vault_data_enabled})"` : "";
+      const dbtClickable = u.active ? `onclick="toggleAccess('${emailEnc}', 'dbt_mcp_enabled', ${!u.dbt_mcp_enabled})"` : "";
+      return `
       <tr>
         <td class="email">${escapeHtml(u.email)}</td>
         <td>
@@ -436,19 +509,32 @@ async function refresh() {
             ${u.active ? "active" : "revoked"}
           </span>
         </td>
+        <td class="access-cell">
+          <span class="toggle-pill ${u.vault_data_enabled ? "on" : "off"}${disabledCls}"
+                ${vdClickable}
+                title="${u.active ? "Click to toggle vault-data /mcp access" : "Account revoked — toggles inactive"}">
+            VD ${u.vault_data_enabled ? "✓" : "✗"}
+          </span>
+          <span class="toggle-pill ${u.dbt_mcp_enabled ? "on" : "off"}${disabledCls}"
+                ${dbtClickable}
+                title="${u.active ? "Click to toggle dbt-mcp Semantic Layer access" : "Account revoked — toggles inactive"}">
+            SL ${u.dbt_mcp_enabled ? "✓" : "✗"}
+          </span>
+        </td>
         <td class="small">${fmtDate(u.last_used_at)}</td>
         <td class="small">${fmtDate(u.created_at)}</td>
         <td class="actions">
           ${u.active ? `
-            <button class="ghost" onclick="openEdit('${encodeURIComponent(u.email)}', ${JSON.stringify(u.display_name || "")}, '${escapeHtml(u.role_label || "exec")}', ${JSON.stringify(u.notes || "")})">Edit</button>
-            <button class="warn" onclick="regenerate('${encodeURIComponent(u.email)}')">Regenerate</button>
-            <button class="danger" onclick="revoke('${encodeURIComponent(u.email)}')">Revoke</button>
+            <button class="ghost" onclick="openEdit('${emailEnc}', ${JSON.stringify(u.display_name || "")}, '${escapeHtml(u.role_label || "exec")}', ${JSON.stringify(u.notes || "")}, ${u.vault_data_enabled}, ${u.dbt_mcp_enabled})">Edit</button>
+            <button class="warn" onclick="regenerate('${emailEnc}')">Regenerate</button>
+            <button class="danger" onclick="revoke('${emailEnc}')">Revoke</button>
           ` : `
-            <button class="ghost" onclick="reactivate('${encodeURIComponent(u.email)}')">Reactivate</button>
-            <button class="danger" onclick="hardDelete('${encodeURIComponent(u.email)}')">Hard delete</button>
+            <button class="ghost" onclick="reactivate('${emailEnc}')">Reactivate</button>
+            <button class="danger" onclick="hardDelete('${emailEnc}')">Hard delete</button>
           `}
         </td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
   } catch (e) {
     if (e.status === 401 || e.status === 403) {
       clearKey();
@@ -465,15 +551,36 @@ async function addUser() {
   const display_name = document.getElementById("new-name").value.trim();
   const role_label = document.getElementById("new-role").value;
   const notes = document.getElementById("new-notes").value.trim();
+  const vault_data_enabled = document.getElementById("new-vd-enabled").checked;
+  const dbt_mcp_enabled = document.getElementById("new-dbt-enabled").checked;
   if (!email) { toast("Email is required", "err"); return; }
+  if (!vault_data_enabled && !dbt_mcp_enabled) {
+    if (!confirm("Both MCPs disabled — this user won't be able to call anything. Continue anyway?")) return;
+  }
   try {
     const { token } = await api("POST", "/admin/api/users", {
-      email, display_name, role_label, notes
+      email, display_name, role_label, notes,
+      vault_data_enabled, dbt_mcp_enabled,
     });
     document.getElementById("new-email").value = "";
     document.getElementById("new-name").value = "";
     document.getElementById("new-notes").value = "";
+    // Reset toggles to default (both on).
+    document.getElementById("new-vd-enabled").checked = true;
+    document.getElementById("new-dbt-enabled").checked = true;
     showTokenOnce(email, token, `Token for ${email}`);
+    await refresh();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+async function toggleAccess(emailEnc, field, newValue) {
+  const email = decodeURIComponent(emailEnc);
+  const serverName = field === "vault_data_enabled" ? "vault-data /mcp" : "dbt-mcp Semantic Layer";
+  try {
+    await api("PATCH", `/admin/api/users/${emailEnc}`, { [field]: newValue });
+    toast(`${escapeHtml(email)} — ${serverName} ${newValue ? "enabled" : "disabled"}`, "ok");
     await refresh();
   } catch (e) {
     toast(e.message, "err");
@@ -529,13 +636,15 @@ async function hardDelete(emailEnc) {
   }
 }
 
-function openEdit(emailEnc, displayName, role, notes) {
+function openEdit(emailEnc, displayName, role, notes, vdEnabled, dbtEnabled) {
   document.getElementById("edit-email-hidden").value = emailEnc;
   document.getElementById("edit-email-display").innerText =
     "Editing " + decodeURIComponent(emailEnc);
   document.getElementById("edit-name").value = displayName || "";
   document.getElementById("edit-role").value = role || "exec";
   document.getElementById("edit-notes").value = notes || "";
+  document.getElementById("edit-vd-enabled").checked = !!vdEnabled;
+  document.getElementById("edit-dbt-enabled").checked = !!dbtEnabled;
   document.getElementById("edit-modal-bg").classList.add("open");
 }
 
@@ -549,6 +658,8 @@ async function saveEdit() {
     display_name: document.getElementById("edit-name").value.trim(),
     role_label: document.getElementById("edit-role").value,
     notes: document.getElementById("edit-notes").value.trim(),
+    vault_data_enabled: document.getElementById("edit-vd-enabled").checked,
+    dbt_mcp_enabled: document.getElementById("edit-dbt-enabled").checked,
   };
   try {
     await api("PATCH", `/admin/api/users/${emailEnc}`, body);

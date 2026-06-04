@@ -87,6 +87,16 @@ class PostgresTokenVerifier(TokenVerifier):
             raise
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        """Validate a bearer token against mcp_user_tokens.
+
+        Three gates must all be true for the token to authenticate:
+          - active            (account not revoked)
+          - dbt_mcp_enabled   (per-MCP toggle for THIS server)
+
+        An admin can disable a user's access here independently of
+        vault-data /mcp — the same token may still work on vault-data
+        if vault_data_enabled is true.
+        """
         if not token:
             return None
         try:
@@ -96,7 +106,7 @@ class PostgresTokenVerifier(TokenVerifier):
                         """
                         UPDATE mcp_user_tokens
                         SET last_used_at = now()
-                        WHERE token = %s AND active
+                        WHERE token = %s AND active AND dbt_mcp_enabled
                         RETURNING email, display_name, role_label
                         """,
                         (token,),
@@ -106,7 +116,10 @@ class PostgresTokenVerifier(TokenVerifier):
             log.error("Token verification DB error: %s", e)
             return None
         if not row:
-            log.warning("Rejected request: unknown or revoked token")
+            log.warning(
+                "Rejected request: unknown token, revoked account, or "
+                "dbt-mcp access disabled for this user"
+            )
             return None
         return AccessToken(
             token=token,
