@@ -144,6 +144,7 @@ def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
     # 2. Wire Postgres-backed bearer-token auth when VAULT_DATA_DATABASE_URL is set.
     database_url = os.environ.get("VAULT_DATA_DATABASE_URL")
     if database_url:
+        # The dbt-mcp's own public URL (where claude.ai sends MCP requests).
         public_url = os.environ.get("MCP_PUBLIC_URL")
         if not public_url:
             railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
@@ -153,20 +154,34 @@ def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 else "http://localhost:8000"
             )
 
+        # The OAuth authorization server URL. This is vault-data — it has
+        # the full DCR + PKCE + authorize/token flow that claude.ai's
+        # Custom Connector requires. We're the resource server; vault-data
+        # is the authorization server. Same shared `mcp_user_tokens` table
+        # underneath, so tokens work on both. (RFC 9728 pattern.)
+        auth_server_url = os.environ.get(
+            "AUTH_SERVER_URL",
+            "https://vault-data-production.up.railway.app",
+        )
+
         verifier = PostgresTokenVerifier(database_url)
         kwargs.setdefault("token_verifier", verifier)
         kwargs.setdefault(
             "auth",
             AuthSettings(
-                issuer_url=AnyHttpUrl(public_url),
+                # issuer_url drives the `authorization_servers` field in the
+                # protected-resource metadata. claude.ai discovers it on us
+                # and then does OAuth against vault-data.
+                issuer_url=AnyHttpUrl(auth_server_url),
                 resource_server_url=AnyHttpUrl(public_url),
                 required_scopes=["mcp:tools"],
             ),
         )
         log.info(
             "Bearer-token auth enabled — validating against vault-data "
-            "mcp_user_tokens (issuer=%s)",
+            "mcp_user_tokens (resource=%s, auth-server=%s)",
             public_url,
+            auth_server_url,
         )
     else:
         log.warning(

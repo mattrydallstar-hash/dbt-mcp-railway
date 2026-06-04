@@ -49,6 +49,30 @@ log = logging.getLogger("dbt-mcp-railway.admin")
 # RFC 5322 simplified — enough to catch obvious typos.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+
+# ─── OAuth resource-server metadata ──────────────────────────────────────────
+# These endpoints let claude.ai's Custom Connector discover that we're a
+# protected resource and that vault-data is our authorization server.
+# RFC 9728 (Protected Resource Metadata) + RFC 8414 (Authorization Server
+# Metadata). We're the resource server; vault-data has the full OAuth
+# 2.0 + PKCE + DCR flow. Tokens land in shared mcp_user_tokens.
+
+def _public_url() -> str:
+    """Discover the dbt-mcp's own URL — where claude.ai sends MCP requests."""
+    url = os.environ.get("MCP_PUBLIC_URL", "").rstrip("/")
+    if url:
+        return url
+    rd = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").rstrip("/")
+    return f"https://{rd}" if rd else "http://localhost:8000"
+
+
+def _auth_server_url() -> str:
+    """Discover the OAuth authorization server URL (vault-data)."""
+    return os.environ.get(
+        "AUTH_SERVER_URL",
+        "https://vault-data-production.up.railway.app",
+    ).rstrip("/")
+
 # Roles we want to allow. Keep this aligned with whatever vault-data uses.
 ALLOWED_ROLES = {"exec", "analyst", "admin", "csr", "ops", "owner"}
 
@@ -315,9 +339,81 @@ def _validate_role(role: str | None) -> str:
 # ─── Route registration ──────────────────────────────────────────────────────
 
 def register_admin_routes(mcp: FastMCP) -> None:
-    """Wire admin routes onto a FastMCP instance."""
+    """Wire admin + OAuth-metadata routes onto a FastMCP instance."""
     db = TokenDB()
     html_path = Path(__file__).parent / "admin.html"
+
+    # ─── OAuth metadata routes ───────────────────────────────────────────
+    # These advertise vault-data as the authorization server so claude.ai's
+    # Custom Connector can do its OAuth dance there. FastMCP also auto-emits
+    # `/.well-known/oauth-protected-resource` via AuthSettings — these
+    # handlers cover the /mcp-scoped path that claude.ai sometimes probes,
+    # and provide a manual /.well-known/oauth-authorization-server alias
+    # that proxies vault-data's discovery doc (some clients fetch this on
+    # the resource server rather than following the issuer redirect).
+
+    def _protected_resource_doc():
+        return {
+            "resource": f"{_public_url()}/mcp",
+            "authorization_servers": [_auth_server_url()],
+            "bearer_methods_supported": ["header"],
+            "scopes_supported": ["mcp"],
+        }
+
+    def _authorization_server_doc():
+        # Mirror the shape Bob emits on vault-data, but with the auth-server
+        # base URL pointing at the real auth server. Lets clients that probe
+        # this on the resource server still get something useful.
+        base = _auth_server_url()
+        return {
+            "issuer": base,
+            "authorization_endpoint": f"{base}/oauth/authorize",
+            "token_endpoint": f"{base}/oauth/token",
+            "registration_endpoint": f"{base}/oauth/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+            "scopes_supported": ["mcp"],
+            "code_challenge_methods_supported": ["S256", "plain"],
+        }
+
+    @mcp.custom_route(
+        "/mcp/.well-known/oauth-protected-resource",
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    async def protected_resource_mcp_scoped(request: Request) -> JSONResponse:
+        # MCP spec — protected-resource metadata MAY live under the resource path.
+        # Anthropic clients have been observed to probe this path. (Bob added
+        # the same alias on vault-data.)
+        return JSONResponse(_protected_resource_doc())
+
+    @mcp.custom_route(
+        "/.well-known/oauth-protected-resource",
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    async def protected_resource_root(request: Request) -> JSONResponse:
+        # Manual root-path emit. FastMCP auto-mounts this too via AuthSettings,
+        # but our hand-rolled doc is the canonical one (we want to control
+        # exactly what claude.ai sees).
+        return JSONResponse(_protected_resource_doc())
+
+    @mcp.custom_route(
+        "/.well-known/oauth-authorization-server",
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    async def authorization_server_metadata(request: Request) -> JSONResponse:
+        return JSONResponse(_authorization_server_doc())
+
+    @mcp.custom_route(
+        "/mcp/.well-known/oauth-authorization-server",
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    async def authorization_server_metadata_mcp_scoped(request: Request) -> JSONResponse:
+        return JSONResponse(_authorization_server_doc())
 
     def _require_admin(request: Request) -> JSONResponse | None:
         admin_key = os.environ.get("MCP_ADMIN_KEY")
