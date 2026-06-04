@@ -1,144 +1,319 @@
 """
-Admin web app for managing dbt-mcp API keys.
+Admin web app for managing vault-data's mcp_user_tokens table.
+
+Tokens issued here are valid against BOTH:
+  - this server (the standalone dbt-mcp Semantic Layer endpoint)
+  - vault-data's /mcp endpoint (raw SQL with PII guardrails)
+
+Because both servers validate against the same Postgres table, you only
+need to issue (and revoke) tokens in one place.
 
 Exposes:
-  GET  /admin/                — HTML UI
-  GET  /admin/api/users       — list users
-  POST /admin/api/users       — create user (returns the new key once)
-  DELETE /admin/api/users/{name}   — delete user
-  POST /admin/api/users/{name}/rotate — regenerate user's key (returns new key once)
+  GET    /admin/                              — HTML UI
+  GET    /admin/api/users                     — list all users (active + revoked)
+  POST   /admin/api/users                     — create user
+                                                body: {email, display_name?, role_label?, notes?}
+                                                returns token ONCE
+  POST   /admin/api/users/{email}/regenerate  — rotate user's token
+                                                returns new token ONCE
+  POST   /admin/api/users/{email}/revoke      — set active=false (soft delete)
+  POST   /admin/api/users/{email}/reactivate  — set active=true AND regenerate token
+                                                (old token assumed compromised)
+  PATCH  /admin/api/users/{email}             — update display_name, role_label, notes
+                                                body: {display_name?, role_label?, notes?}
+  DELETE /admin/api/users/{email}             — hard delete (use revoke for normal offboarding)
 
-All routes require Authorization: Bearer <MCP_ADMIN_KEY>.
-
-How it persists:
-  Each mutation re-fetches MCP_API_KEYS_JSON from Railway, applies the
-  change, and writes back via Railway's GraphQL API. Railway auto-
-  redeploys on env-var change (~30s) and the new container reads the
-  updated keys at startup. The in-memory verifier we already keep in
-  entrypoint.StaticKeyVerifier is also updated in-process so the UI
-  reflects changes immediately (between the write and the redeploy).
+All /admin/api/* routes require Authorization: Bearer <MCP_ADMIN_KEY>.
 
 Required env vars (in addition to what entrypoint.py needs):
-  RAILWAY_API_TOKEN          — project token with write scope
-  RAILWAY_PROJECT_ID         — auto-injected by Railway
-  RAILWAY_ENVIRONMENT_ID     — auto-injected by Railway
-  RAILWAY_SERVICE_ID         — auto-injected by Railway
+  VAULT_DATA_DATABASE_URL — Postgres URL (same one entrypoint uses)
+  MCP_ADMIN_KEY           — gates the admin endpoints. Long random string.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
+import re
 import secrets
 from pathlib import Path
 
-import httpx
+import psycopg2
 from mcp.server.fastmcp import FastMCP  # type: ignore
+from psycopg2.extras import RealDictCursor
 from starlette.requests import Request  # type: ignore
 from starlette.responses import HTMLResponse, JSONResponse  # type: ignore
 
 log = logging.getLogger("dbt-mcp-railway.admin")
 
-RAILWAY_API = "https://backboard.railway.com/graphql/v2"
-KEYS_VAR = "MCP_API_KEYS_JSON"
+# RFC 5322 simplified — enough to catch obvious typos.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# Roles we want to allow. Keep this aligned with whatever vault-data uses.
+ALLOWED_ROLES = {"exec", "analyst", "admin", "csr", "ops", "owner"}
 
 
-# ─── Railway client (writes MCP_API_KEYS_JSON) ────────────────────────────────
+# ─── Postgres token CRUD ─────────────────────────────────────────────────────
 
-class RailwayClient:
+class TokenDB:
+    """All persistence for mcp_user_tokens. One method per admin action."""
+
     def __init__(self) -> None:
-        self.token = os.environ.get("RAILWAY_API_TOKEN")
-        self.project_id = os.environ.get("RAILWAY_PROJECT_ID")
-        self.env_id = os.environ.get("RAILWAY_ENVIRONMENT_ID")
-        self.service_id = os.environ.get("RAILWAY_SERVICE_ID")
-        self.enabled = all((self.token, self.project_id, self.env_id, self.service_id))
-        if not self.enabled:
+        self._dsn = os.environ.get("VAULT_DATA_DATABASE_URL")
+        if not self._dsn:
             log.warning(
-                "Admin mutations disabled: missing one of RAILWAY_API_TOKEN, "
-                "RAILWAY_PROJECT_ID, RAILWAY_ENVIRONMENT_ID, RAILWAY_SERVICE_ID."
+                "VAULT_DATA_DATABASE_URL is not set — admin endpoints will 500."
             )
 
-    async def get_keys(self) -> dict[str, str]:
-        """Read the current MCP_API_KEYS_JSON from Railway (source of truth)."""
-        if not self.enabled:
-            raise RuntimeError("RailwayClient is disabled (missing env vars)")
-        query = (
-            "query Vars($projectId: String!, $environmentId: String!, $serviceId: String!) {"
-            " variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }"
-        )
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(
-                RAILWAY_API,
-                json={"query": query, "variables": {
-                    "projectId": self.project_id,
-                    "environmentId": self.env_id,
-                    "serviceId": self.service_id,
-                }},
-                headers={"Project-Access-Token": self.token},
+    def _connect(self):
+        if not self._dsn:
+            raise RuntimeError(
+                "VAULT_DATA_DATABASE_URL is not set on this Railway service"
             )
-        r.raise_for_status()
-        data = r.json()["data"]["variables"]
-        raw = data.get(KEYS_VAR, "{}")
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = {}
-        return parsed if isinstance(parsed, dict) else {}
+        return psycopg2.connect(self._dsn)
 
-    async def set_keys(self, keys: dict[str, str]) -> None:
-        """Persist MCP_API_KEYS_JSON to Railway (triggers auto-redeploy)."""
-        if not self.enabled:
-            raise RuntimeError("RailwayClient is disabled (missing env vars)")
-        mutation = (
-            "mutation Upsert($input: VariableCollectionUpsertInput!) {"
-            " variableCollectionUpsert(input: $input) }"
+    def list_users(self) -> list[dict]:
+        """Return all users (active + revoked), newest first."""
+        with self._connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT email,
+                           display_name,
+                           role_label,
+                           active,
+                           created_at,
+                           last_used_at,
+                           notes,
+                           -- Don't return the raw token; only the prefix for visual ID.
+                           LEFT(token, 8) || '…' AS token_prefix
+                    FROM mcp_user_tokens
+                    ORDER BY active DESC, created_at DESC
+                    """
+                )
+                return [dict(r) for r in cur.fetchall()]
+
+    def find_active(self, email: str) -> dict | None:
+        """Return the active row for email, or None."""
+        with self._connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT token, email, display_name, role_label, active,
+                           created_at, last_used_at, notes
+                    FROM mcp_user_tokens
+                    WHERE email = %s AND active
+                    LIMIT 1
+                    """,
+                    (email,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def find_any(self, email: str) -> dict | None:
+        """Return any row for email (active or revoked)."""
+        with self._connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT token, email, display_name, role_label, active,
+                           created_at, last_used_at, notes
+                    FROM mcp_user_tokens
+                    WHERE email = %s
+                    ORDER BY active DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (email,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def create_user(
+        self,
+        email: str,
+        display_name: str | None,
+        role_label: str,
+        notes: str | None,
+    ) -> str:
+        """Insert a new user. Returns the freshly generated token."""
+        if self.find_active(email):
+            raise ValueError(f"user '{email}' already exists (active)")
+        token = _new_token()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO mcp_user_tokens
+                        (token, email, display_name, role_label, notes, active)
+                    VALUES (%s, %s, %s, %s, %s, TRUE)
+                    """,
+                    (token, email, display_name, role_label, notes),
+                )
+        return token
+
+    def regenerate(self, email: str) -> str:
+        """Rotate the active user's token. Old token immediately invalid.
+
+        Implementation: UPDATE the existing row in place. The PK constraint
+        on token is fine since we generate a fresh random value.
+        """
+        new_token = _new_token()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE mcp_user_tokens
+                    SET token = %s,
+                        last_used_at = NULL
+                    WHERE email = %s AND active
+                    """,
+                    (new_token, email),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(
+                        f"no active user '{email}' to regenerate "
+                        "(check email or reactivate first)"
+                    )
+        return new_token
+
+    def revoke(self, email: str) -> None:
+        """Soft delete: set active=false. Token row preserved for audit."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE mcp_user_tokens
+                    SET active = FALSE
+                    WHERE email = %s AND active
+                    """,
+                    (email,),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"no active user '{email}' to revoke")
+
+    def reactivate(self, email: str) -> str:
+        """Reactivate a revoked user AND regenerate their token.
+
+        The old token is assumed compromised (that's typically why an
+        account was revoked). New token returned ONCE.
+        """
+        new_token = _new_token()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE mcp_user_tokens
+                    SET active = TRUE,
+                        token = %s,
+                        last_used_at = NULL
+                    WHERE email = %s AND NOT active
+                    """,
+                    (new_token, email),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(
+                        f"no revoked user '{email}' to reactivate "
+                        "(maybe already active?)"
+                    )
+        return new_token
+
+    def update_metadata(
+        self,
+        email: str,
+        display_name: str | None = None,
+        role_label: str | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Patch the display_name / role_label / notes of an active user.
+
+        None means "leave unchanged" (vs explicit empty string which clears
+        a nullable column).
+        """
+        sets, params = [], []
+        if display_name is not None:
+            sets.append("display_name = %s")
+            params.append(display_name)
+        if role_label is not None:
+            sets.append("role_label = %s")
+            params.append(role_label)
+        if notes is not None:
+            sets.append("notes = %s")
+            params.append(notes)
+        if not sets:
+            return
+        params.append(email)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE mcp_user_tokens
+                    SET {", ".join(sets)}
+                    WHERE email = %s AND active
+                    """,
+                    tuple(params),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"no active user '{email}' to update")
+
+    def hard_delete(self, email: str) -> None:
+        """Permanently remove the row. Loses the audit history — use revoke
+        for normal offboarding."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM mcp_user_tokens WHERE email = %s",
+                    (email,),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"no user '{email}' to delete")
+
+
+# ─── helpers ─────────────────────────────────────────────────────────────────
+
+def _new_token() -> str:
+    """Generate a 48-char URL-safe token. ~256 bits of entropy."""
+    return secrets.token_urlsafe(36)
+
+
+def _validate_email(email: str) -> str:
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise ValueError("email looks invalid")
+    return email
+
+
+def _validate_role(role: str | None) -> str:
+    role = (role or "exec").strip().lower()
+    if role not in ALLOWED_ROLES:
+        raise ValueError(
+            f"role_label '{role}' is not in {sorted(ALLOWED_ROLES)}"
         )
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(
-                RAILWAY_API,
-                json={
-                    "query": mutation,
-                    "variables": {"input": {
-                        "projectId": self.project_id,
-                        "environmentId": self.env_id,
-                        "serviceId": self.service_id,
-                        "variables": {KEYS_VAR: json.dumps(keys)},
-                        "replace": False,
-                    }},
-                },
-                headers={"Project-Access-Token": self.token},
-            )
-        r.raise_for_status()
-        result = r.json()
-        if result.get("errors"):
-            raise RuntimeError(f"Railway error: {result['errors']}")
+    return role
 
 
 # ─── Route registration ──────────────────────────────────────────────────────
 
-def register_admin_routes(mcp: FastMCP, verifier_singleton_getter) -> None:
-    """
-    Wire admin routes onto a FastMCP instance.
-
-    verifier_singleton_getter is a callable returning the current
-    StaticKeyVerifier (or None). Lazy lookup so we don't snapshot a
-    stale reference if the verifier ever gets rebuilt.
-    """
-    railway = RailwayClient()
+def register_admin_routes(mcp: FastMCP) -> None:
+    """Wire admin routes onto a FastMCP instance."""
+    db = TokenDB()
     html_path = Path(__file__).parent / "admin.html"
 
     def _require_admin(request: Request) -> JSONResponse | None:
         admin_key = os.environ.get("MCP_ADMIN_KEY")
         if not admin_key:
             return JSONResponse(
-                {"error": "admin disabled (MCP_ADMIN_KEY not set)"}, status_code=404
+                {"error": "admin disabled (MCP_ADMIN_KEY not set)"},
+                status_code=404,
             )
         auth = request.headers.get("authorization", "")
         if not auth.startswith("Bearer "):
-            return JSONResponse({"error": "missing Bearer token"}, status_code=401)
+            return JSONResponse(
+                {"error": "missing Bearer token"}, status_code=401
+            )
         if auth.removeprefix("Bearer ").strip() != admin_key:
-            return JSONResponse({"error": "invalid admin token"}, status_code=403)
+            return JSONResponse(
+                {"error": "invalid admin token"}, status_code=403
+            )
         return None
 
     @mcp.custom_route("/admin/", methods=["GET"], include_in_schema=False)
@@ -149,30 +324,27 @@ def register_admin_routes(mcp: FastMCP, verifier_singleton_getter) -> None:
             return HTMLResponse(html_path.read_text())
         return HTMLResponse("<h1>admin.html not found</h1>", status_code=500)
 
-    @mcp.custom_route("/admin/api/users", methods=["GET"], include_in_schema=False)
+    @mcp.custom_route(
+        "/admin/api/users", methods=["GET"], include_in_schema=False
+    )
     async def list_users(request: Request) -> JSONResponse:
         if (err := _require_admin(request)):
             return err
-        verifier = verifier_singleton_getter()
-        stats = verifier.get_stats(include_keys=False) if verifier else []
         try:
-            keys = await railway.get_keys()
+            users = db.list_users()
         except Exception as e:
+            log.exception("list_users failed")
             return JSONResponse({"error": str(e), "users": []}, status_code=500)
-        # Merge persisted keys (source of truth) with in-memory usage stats
-        users = []
-        stats_by_user = {row["user"]: row for row in stats}
-        for user, key in sorted(keys.items()):
-            s = stats_by_user.get(user, {})
-            users.append({
-                "user": user,
-                "key_prefix": key[:8] + "…",
-                "calls": s.get("calls", 0),
-                "last_seen": s.get("last_seen"),
-            })
+        # JSONResponse can't serialize datetimes — convert.
+        for u in users:
+            for k in ("created_at", "last_used_at"):
+                if u.get(k) is not None:
+                    u[k] = u[k].isoformat()
         return JSONResponse({"users": users})
 
-    @mcp.custom_route("/admin/api/users", methods=["POST"], include_in_schema=False)
+    @mcp.custom_route(
+        "/admin/api/users", methods=["POST"], include_in_schema=False
+    )
     async def create_user(request: Request) -> JSONResponse:
         if (err := _require_admin(request)):
             return err
@@ -180,68 +352,152 @@ def register_admin_routes(mcp: FastMCP, verifier_singleton_getter) -> None:
             payload = await request.json()
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        name = (payload.get("name") or "").strip()
-        if not name:
-            return JSONResponse({"error": "name is required"}, status_code=400)
-        if not name.replace("_", "").replace("-", "").replace(".", "").isalnum():
-            return JSONResponse(
-                {"error": "name must be alphanumeric (with _ - . allowed)"},
-                status_code=400,
-            )
-        keys = await railway.get_keys()
-        if name in keys:
-            return JSONResponse(
-                {"error": f"user '{name}' already exists"}, status_code=409
-            )
-        new_key = secrets.token_urlsafe(32)
-        keys[name] = new_key
-        await railway.set_keys(keys)
-        log.info("Created user '%s' (Railway redeploy triggered)", name)
+
+        try:
+            email = _validate_email(payload.get("email", ""))
+            role = _validate_role(payload.get("role_label"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        display_name = (payload.get("display_name") or "").strip() or None
+        notes = (payload.get("notes") or "").strip() or None
+
+        try:
+            token = db.create_user(email, display_name, role, notes)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+        except Exception as e:
+            log.exception("create_user failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+        log.info("Created user %s (role=%s)", email, role)
         return JSONResponse({
-            "user": name,
-            "key": new_key,
-            "note": "Save this key now — it will not be shown again. "
-                    "Container redeploy is in progress (~30s).",
+            "email": email,
+            "token": token,
+            "note": "Save this token now — it will not be shown again. "
+                    "Valid on both this MCP and vault-data's /mcp.",
         })
 
     @mcp.custom_route(
-        "/admin/api/users/{name}", methods=["DELETE"], include_in_schema=False
+        "/admin/api/users/{email}/regenerate",
+        methods=["POST"],
+        include_in_schema=False,
+    )
+    async def regenerate_user(request: Request) -> JSONResponse:
+        if (err := _require_admin(request)):
+            return err
+        email = request.path_params["email"]
+        try:
+            token = db.regenerate(email)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            log.exception("regenerate failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        log.info("Regenerated token for %s", email)
+        return JSONResponse({
+            "email": email,
+            "token": token,
+            "note": "Save this token now — old token revoked immediately.",
+        })
+
+    @mcp.custom_route(
+        "/admin/api/users/{email}/revoke",
+        methods=["POST"],
+        include_in_schema=False,
+    )
+    async def revoke_user(request: Request) -> JSONResponse:
+        if (err := _require_admin(request)):
+            return err
+        email = request.path_params["email"]
+        try:
+            db.revoke(email)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            log.exception("revoke failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        log.info("Revoked user %s", email)
+        return JSONResponse({"email": email, "revoked": True})
+
+    @mcp.custom_route(
+        "/admin/api/users/{email}/reactivate",
+        methods=["POST"],
+        include_in_schema=False,
+    )
+    async def reactivate_user(request: Request) -> JSONResponse:
+        if (err := _require_admin(request)):
+            return err
+        email = request.path_params["email"]
+        try:
+            token = db.reactivate(email)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            log.exception("reactivate failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        log.info("Reactivated user %s (token regenerated)", email)
+        return JSONResponse({
+            "email": email,
+            "token": token,
+            "note": "Save this token now — old token discarded.",
+        })
+
+    @mcp.custom_route(
+        "/admin/api/users/{email}",
+        methods=["PATCH"],
+        include_in_schema=False,
+    )
+    async def edit_user(request: Request) -> JSONResponse:
+        if (err := _require_admin(request)):
+            return err
+        email = request.path_params["email"]
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+        # Each field is optional. None = leave unchanged.
+        dn = payload.get("display_name")
+        role = payload.get("role_label")
+        notes = payload.get("notes")
+
+        if role is not None:
+            try:
+                role = _validate_role(role)
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        try:
+            db.update_metadata(
+                email,
+                display_name=dn,
+                role_label=role,
+                notes=notes,
+            )
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            log.exception("edit failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        log.info("Edited user %s", email)
+        return JSONResponse({"email": email, "updated": True})
+
+    @mcp.custom_route(
+        "/admin/api/users/{email}",
+        methods=["DELETE"],
+        include_in_schema=False,
     )
     async def delete_user(request: Request) -> JSONResponse:
         if (err := _require_admin(request)):
             return err
-        name = request.path_params["name"]
-        keys = await railway.get_keys()
-        if name not in keys:
-            return JSONResponse(
-                {"error": f"user '{name}' not found"}, status_code=404
-            )
-        del keys[name]
-        await railway.set_keys(keys)
-        log.info("Deleted user '%s' (Railway redeploy triggered)", name)
-        return JSONResponse({"user": name, "deleted": True})
-
-    @mcp.custom_route(
-        "/admin/api/users/{name}/rotate",
-        methods=["POST"],
-        include_in_schema=False,
-    )
-    async def rotate_user(request: Request) -> JSONResponse:
-        if (err := _require_admin(request)):
-            return err
-        name = request.path_params["name"]
-        keys = await railway.get_keys()
-        if name not in keys:
-            return JSONResponse(
-                {"error": f"user '{name}' not found"}, status_code=404
-            )
-        new_key = secrets.token_urlsafe(32)
-        keys[name] = new_key
-        await railway.set_keys(keys)
-        log.info("Rotated key for '%s' (Railway redeploy triggered)", name)
-        return JSONResponse({
-            "user": name,
-            "key": new_key,
-            "note": "Save this key now — old key revoked. "
-                    "Container redeploy is in progress (~30s).",
-        })
+        email = request.path_params["email"]
+        try:
+            db.hard_delete(email)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            log.exception("delete failed")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        log.info("Hard-deleted user %s", email)
+        return JSONResponse({"email": email, "deleted": True})

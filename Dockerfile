@@ -10,13 +10,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin the version we tested against. Bump as new dbt-mcp releases drop.
-# httpx is for the admin endpoints to call Railway's GraphQL API.
-RUN pip install --no-cache-dir 'dbt-mcp==1.19.1' 'httpx>=0.27,<1'
+# psycopg2-binary backs the PostgresTokenVerifier (auth) + the admin
+# Postgres CRUD on vault-data's mcp_user_tokens table.
+RUN pip install --no-cache-dir 'dbt-mcp==1.19.1' 'psycopg2-binary>=2.9,<3'
 
 # Wrapper that monkey-patches FastMCP.__init__ to honor FASTMCP_HOST /
 # FASTMCP_PORT env vars (the SDK currently ignores them on construction,
 # so dbt-mcp would otherwise bind to 127.0.0.1 — unreachable from
-# Railway's proxy). It also registers the admin web app + API.
+# Railway's proxy). It also wires Postgres-backed bearer auth + the
+# admin web app.
 COPY entrypoint.py /app/entrypoint.py
 COPY admin.py /app/admin.py
 COPY admin.html /app/admin.html

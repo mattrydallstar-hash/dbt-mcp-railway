@@ -8,105 +8,112 @@ Three things this adds on top of dbt-mcp:
     unless we override. We read FASTMCP_HOST / FASTMCP_PORT from env
     and inject them.
 
-2.  dbt-mcp ships zero incoming-auth. We add user-aligned static-key
-    auth via MCP_API_KEYS_JSON:
+2.  Per-user bearer-token auth via vault-data's mcp_user_tokens table
+    (the same table Bob's /mcp endpoint uses). Tokens issued here are
+    valid against both this server AND vault-data /mcp — single source
+    of truth for "who's a user." Set VAULT_DATA_DATABASE_URL to the
+    Postgres URL of the vault-data database.
 
-        MCP_API_KEYS_JSON='{"matt":"abc123...","bob":"def456..."}'
+3.  A web admin app at /admin/ for creating, regenerating, and
+    revoking user tokens. Gated by MCP_ADMIN_KEY. Talks directly to
+    Postgres (no Railway redeploy needed — changes are live instantly).
 
-    Each user's bearer token resolves to their username on the
-    AccessToken, so request logs and downstream tools can attribute
-    usage per-person.
-
-3.  An /admin/users endpoint exposes the key table + per-user usage
-    stats (call count, last-seen timestamp). Gated by a separate
-    MCP_ADMIN_KEY env var. Useful for "who's using this and which
-    key blew up the rate limit."
-
-When MCP_API_KEYS_JSON is unset, auth is disabled (server is open,
-warning logged). When MCP_ADMIN_KEY is unset, the admin endpoint
-returns 404.
+When VAULT_DATA_DATABASE_URL is unset, auth is disabled and the server
+is open (warning logged). When MCP_ADMIN_KEY is unset, the admin
+endpoint returns 404.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-from datetime import datetime, timezone
 
+import psycopg2
 from mcp.server.auth.provider import AccessToken, TokenVerifier  # type: ignore
 from mcp.server.auth.settings import AuthSettings  # type: ignore
 from mcp.server.fastmcp import FastMCP  # type: ignore
+from psycopg2.extras import RealDictCursor
 from pydantic import AnyHttpUrl
-from starlette.requests import Request  # type: ignore
-from starlette.responses import JSONResponse  # type: ignore
 
 log = logging.getLogger("dbt-mcp-railway")
 
 
-# ─── Static-key TokenVerifier (with usage stats) ─────────────────────────────
+# ─── Postgres-backed TokenVerifier ───────────────────────────────────────────
 
-class StaticKeyVerifier(TokenVerifier):
-    """Validates bearer tokens against a fixed {user → key} mapping.
+class PostgresTokenVerifier(TokenVerifier):
+    """Validates bearer tokens against vault-data's mcp_user_tokens table.
 
-    Tracks per-user request counts and last-seen timestamps in memory.
-    Counts reset whenever the container restarts — fine for an internal
-    diagnostic view; not durable analytics.
+    Schema (created by vault-data's Data Model/_tbl_mcp_user_tokens.sql):
+        token        TEXT        PRIMARY KEY
+        email        TEXT        NOT NULL
+        display_name TEXT
+        role_label   TEXT        NOT NULL DEFAULT 'exec'
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+        last_used_at TIMESTAMPTZ
+        active       BOOLEAN     NOT NULL DEFAULT TRUE
+        notes        TEXT
+
+    On every successful auth:
+      - UPDATE last_used_at = now()  (durable audit trail — survives restart)
+      - Return AccessToken whose client_id is the user's email
+
+    On failure (unknown token, revoked, DB error):
+      - Return None → FastMCP rejects with 401
     """
 
-    def __init__(self, user_to_key: dict[str, str]) -> None:
-        self._key_to_user = {key: user for user, key in user_to_key.items()}
-        self._stats: dict[str, dict] = {
-            user: {
-                "key": key,
-                "key_prefix": key[:8] + "…",
-                "calls": 0,
-                "last_seen": None,
-            }
-            for user, key in user_to_key.items()
-        }
-        log.info(
-            "StaticKeyVerifier loaded with %d user keys: %s",
-            len(self._stats),
-            ", ".join(sorted(self._stats.keys())),
-        )
+    def __init__(self, database_url: str) -> None:
+        self._dsn = database_url
+        # Probe the connection + table at startup so a misconfigured DB URL
+        # crashes the container immediately instead of silently 401-ing
+        # every request.
+        try:
+            with psycopg2.connect(self._dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM mcp_user_tokens WHERE active"
+                    )
+                    n_active = cur.fetchone()[0]
+            log.info(
+                "PostgresTokenVerifier connected to vault-data DB; "
+                "%d active user tokens",
+                n_active,
+            )
+        except Exception as e:
+            log.error(
+                "PostgresTokenVerifier startup probe failed: %s "
+                "(check VAULT_DATA_DATABASE_URL + that mcp_user_tokens exists)",
+                e,
+            )
+            raise
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        user = self._key_to_user.get(token)
-        if user is None:
-            log.warning("Rejected request: unknown bearer token")
+        if not token:
             return None
-        # In-memory usage tracking.
-        s = self._stats[user]
-        s["calls"] += 1
-        s["last_seen"] = datetime.now(timezone.utc).isoformat()
+        try:
+            with psycopg2.connect(self._dsn) as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        UPDATE mcp_user_tokens
+                        SET last_used_at = now()
+                        WHERE token = %s AND active
+                        RETURNING email, display_name, role_label
+                        """,
+                        (token,),
+                    )
+                    row = cur.fetchone()
+        except Exception as e:
+            log.error("Token verification DB error: %s", e)
+            return None
+        if not row:
+            log.warning("Rejected request: unknown or revoked token")
+            return None
         return AccessToken(
             token=token,
-            client_id=user,
+            client_id=row["email"],
             scopes=["mcp:tools"],
             expires_at=None,
         )
-
-    def get_stats(self, *, include_keys: bool) -> list[dict]:
-        """Return the user table. include_keys=True shows full keys;
-        otherwise just the first-8-char prefix for visual identification."""
-        rows = []
-        for user, s in sorted(self._stats.items()):
-            row = {
-                "user": user,
-                "calls": s["calls"],
-                "last_seen": s["last_seen"],
-            }
-            if include_keys:
-                row["key"] = s["key"]
-            else:
-                row["key_prefix"] = s["key_prefix"]
-            rows.append(row)
-        return rows
-
-
-# Module-level singleton — the admin route handler reaches in here.
-_verifier_singleton: StaticKeyVerifier | None = None
 
 
 # ─── FastMCP construction patch ──────────────────────────────────────────────
@@ -115,39 +122,26 @@ _orig_init = FastMCP.__init__
 
 
 def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-    global _verifier_singleton
-
-    # 1. Bind host / port from env.
+    # 1. Bind host / port from env (Railway needs 0.0.0.0:$PORT).
     kwargs.setdefault("host", os.environ.get("FASTMCP_HOST", "127.0.0.1"))
     port_env = os.environ.get("FASTMCP_PORT")
     if port_env:
         kwargs.setdefault("port", int(port_env))
 
-    # 2. Wire user-aligned static-key auth when MCP_API_KEYS_JSON is set.
-    keys_json = os.environ.get("MCP_API_KEYS_JSON")
-    if keys_json:
-        try:
-            user_to_key = json.loads(keys_json)
-            if not isinstance(user_to_key, dict) or not user_to_key:
-                raise ValueError("must be a non-empty JSON object")
-        except (json.JSONDecodeError, ValueError) as e:
-            raise RuntimeError(
-                f"MCP_API_KEYS_JSON is set but invalid: {e}. "
-                "Expected JSON like {\"matt\":\"abc...\",\"bob\":\"def...\"}"
-            ) from e
-
+    # 2. Wire Postgres-backed bearer-token auth when VAULT_DATA_DATABASE_URL is set.
+    database_url = os.environ.get("VAULT_DATA_DATABASE_URL")
+    if database_url:
         public_url = os.environ.get("MCP_PUBLIC_URL")
         if not public_url:
             railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
             public_url = (
-                f"https://{railway_domain}" if railway_domain else "http://localhost:8000"
+                f"https://{railway_domain}"
+                if railway_domain
+                else "http://localhost:8000"
             )
 
-        # Build the verifier once and reuse for the admin endpoint.
-        if _verifier_singleton is None:
-            _verifier_singleton = StaticKeyVerifier(user_to_key)
-
-        kwargs.setdefault("token_verifier", _verifier_singleton)
+        verifier = PostgresTokenVerifier(database_url)
+        kwargs.setdefault("token_verifier", verifier)
         kwargs.setdefault(
             "auth",
             AuthSettings(
@@ -156,10 +150,14 @@ def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 required_scopes=["mcp:tools"],
             ),
         )
-        log.info("Bearer-token auth enabled (issuer=%s)", public_url)
+        log.info(
+            "Bearer-token auth enabled — validating against vault-data "
+            "mcp_user_tokens (issuer=%s)",
+            public_url,
+        )
     else:
         log.warning(
-            "MCP_API_KEYS_JSON is not set — server is OPEN. "
+            "VAULT_DATA_DATABASE_URL is not set — server is OPEN. "
             "Anyone with the URL can call the Semantic Layer."
         )
 
@@ -167,7 +165,7 @@ def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
 
     # 3. Register the admin web app + API routes on this FastMCP instance.
     from admin import register_admin_routes  # local import: admin.py sits next to entrypoint.py
-    register_admin_routes(self, lambda: _verifier_singleton)
+    register_admin_routes(self)
 
 
 FastMCP.__init__ = _patched_init  # type: ignore[assignment]

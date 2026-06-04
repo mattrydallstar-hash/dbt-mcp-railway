@@ -8,10 +8,12 @@
   :root {
     --bg: #0f172a;
     --panel: #1e293b;
+    --panel-2: #15213a;
     --border: #334155;
     --text: #e2e8f0;
     --muted: #94a3b8;
     --accent: #38bdf8;
+    --accent-dim: #0c4a6e;
     --danger: #f87171;
     --warn: #fbbf24;
     --ok: #4ade80;
@@ -25,8 +27,8 @@
     padding: 24px;
     min-height: 100vh;
   }
-  .container { max-width: 900px; margin: 0 auto; }
-  h1 { font-size: 22px; margin: 0 0 8px; font-weight: 600; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 24px; margin: 0 0 8px; font-weight: 600; }
   .subtitle { color: var(--muted); margin-bottom: 24px; font-size: 14px; }
   .panel {
     background: var(--panel);
@@ -36,7 +38,13 @@
     margin-bottom: 20px;
   }
   .panel h2 { font-size: 16px; margin: 0 0 16px; font-weight: 600; }
-  input[type=text], input[type=password] {
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .form-grid .full { grid-column: 1 / -1; }
+  input[type=text], input[type=email], input[type=password], select, textarea {
     background: #0f172a;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -46,7 +54,11 @@
     width: 100%;
     font-family: inherit;
   }
-  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  textarea { resize: vertical; min-height: 60px; }
+  input:focus, select:focus, textarea:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
   button {
     background: var(--accent);
     color: #0f172a;
@@ -61,20 +73,51 @@
   button:hover { opacity: 0.9; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.danger { background: var(--danger); color: #fff; }
-  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.warn { background: var(--warn); color: #0f172a; }
+  button.ghost {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
   table { width: 100%; border-collapse: collapse; }
   th, td {
     text-align: left;
     padding: 12px 8px;
     border-bottom: 1px solid var(--border);
     font-size: 14px;
+    vertical-align: top;
   }
-  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-  td.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); }
+  th {
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  td.mono {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: var(--muted);
+  }
   td.actions { text-align: right; white-space: nowrap; }
   td.actions button { padding: 6px 10px; font-size: 12px; margin-left: 6px; }
-  .row { display: flex; gap: 10px; align-items: center; }
-  .row > input { flex: 1; }
+  td.email { font-weight: 600; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge.active { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+  .badge.revoked { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+  .badge.role {
+    background: var(--accent-dim);
+    color: var(--accent);
+    margin-left: 6px;
+  }
+  .small { font-size: 12px; color: var(--muted); }
   .toast {
     position: fixed;
     top: 20px;
@@ -83,7 +126,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 16px 20px;
-    max-width: 480px;
+    max-width: 560px;
     box-shadow: 0 4px 20px rgba(0,0,0,0.5);
     z-index: 100;
   }
@@ -100,9 +143,6 @@
     word-break: break-all;
     margin: 8px 0;
   }
-  .small { font-size: 12px; color: var(--muted); }
-  .login-panel { max-width: 420px; margin: 80px auto; }
-  .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; display: block; }
   #connection-snippet {
     background: #0f172a;
     border: 1px solid var(--border);
@@ -114,6 +154,55 @@
     margin-top: 8px;
     white-space: pre-wrap;
   }
+  .login-panel { max-width: 420px; margin: 80px auto; }
+  .label {
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 6px;
+    display: block;
+  }
+  .filter-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .filter-row label {
+    font-size: 13px;
+    color: var(--muted);
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .modal-bg {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+  }
+  .modal-bg.open { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    max-width: 520px;
+    width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+  .modal h2 { font-size: 16px; margin: 0 0 16px; }
+  .modal .actions {
+    text-align: right;
+    margin-top: 20px;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
 </style>
 </head>
 <body>
@@ -123,56 +212,124 @@
     <h1>dbt MCP Admin</h1>
     <p class="subtitle">Enter the admin key to manage user access.</p>
     <label class="label">Admin key</label>
-    <input id="admin-key" type="password" placeholder="MCP_ADMIN_KEY value" />
+    <input id="admin-key" type="password" placeholder="MCP_ADMIN_KEY value"
+           onkeydown="if(event.key==='Enter')login()" />
     <div style="margin-top: 12px">
       <button onclick="login()">Unlock</button>
     </div>
     <p class="small" style="margin-top: 16px">
-      This page never stores your admin key on a server. It only lives in
-      this browser tab's session storage.
+      Your admin key is stored in this browser tab's session storage only.
+      Closing the tab clears it.
     </p>
   </div>
 
   <div id="main" style="display:none">
     <h1>dbt MCP — Users</h1>
     <p class="subtitle">
-      Each user has a unique bearer token they paste into their Claude
-      config. Changes here update Railway and trigger an auto-redeploy
-      (~30s before the change is live).
+      Tokens issued here authenticate against <strong>both</strong> this
+      Semantic-Layer MCP and vault-data's raw-SQL MCP. One token per user,
+      one place to manage.
     </p>
 
     <div class="panel">
       <h2>Add user</h2>
-      <div class="row">
-        <input id="new-user-name" type="text" placeholder="username (alphanumeric + _-.)" />
-        <button onclick="addUser()">Create</button>
+      <div class="form-grid">
+        <div>
+          <label class="label">Email *</label>
+          <input id="new-email" type="email" placeholder="first.last@allstar.example" />
+        </div>
+        <div>
+          <label class="label">Display name</label>
+          <input id="new-name" type="text" placeholder="First Last" />
+        </div>
+        <div>
+          <label class="label">Role</label>
+          <select id="new-role">
+            <option value="exec">exec</option>
+            <option value="analyst">analyst</option>
+            <option value="admin">admin</option>
+            <option value="csr">csr</option>
+            <option value="ops">ops</option>
+            <option value="owner">owner</option>
+          </select>
+        </div>
+        <div>
+          <label class="label">Notes (optional)</label>
+          <input id="new-notes" type="text" placeholder="e.g. board access, pilot user" />
+        </div>
+        <div class="full" style="text-align: right">
+          <button onclick="addUser()">Create &amp; show token</button>
+        </div>
       </div>
     </div>
 
     <div class="panel">
       <h2>Current users</h2>
+      <div class="filter-row">
+        <label>
+          <input type="checkbox" id="show-revoked" onchange="refresh()" />
+          Show revoked
+        </label>
+        <span class="small" id="user-count"></span>
+      </div>
       <table>
         <thead>
           <tr>
-            <th>User</th>
-            <th>Key prefix</th>
-            <th>Calls</th>
-            <th>Last seen (UTC)</th>
+            <th>Email</th>
+            <th>Name / Role</th>
+            <th>Token</th>
+            <th>Status</th>
+            <th>Last used</th>
+            <th>Created</th>
             <th></th>
           </tr>
         </thead>
         <tbody id="users-body">
-          <tr><td colspan="5" class="small">Loading…</td></tr>
+          <tr><td colspan="7" class="small">Loading…</td></tr>
         </tbody>
       </table>
       <p class="small" style="margin-top: 12px">
-        Call counts reset on each container restart. They're useful as a
-        "who's actively using this" signal, not a durable audit log.
+        <code>last_used_at</code> is persisted in Postgres and survives
+        container restarts.
       </p>
     </div>
 
     <div style="text-align: right">
       <button class="ghost" onclick="logout()">Sign out</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit metadata modal -->
+<div id="edit-modal-bg" class="modal-bg" onclick="if(event.target===this)closeEdit()">
+  <div class="modal">
+    <h2>Edit user metadata</h2>
+    <input type="hidden" id="edit-email-hidden" />
+    <p class="small" id="edit-email-display"></p>
+    <div class="form-grid">
+      <div class="full">
+        <label class="label">Display name</label>
+        <input id="edit-name" type="text" />
+      </div>
+      <div class="full">
+        <label class="label">Role</label>
+        <select id="edit-role">
+          <option value="exec">exec</option>
+          <option value="analyst">analyst</option>
+          <option value="admin">admin</option>
+          <option value="csr">csr</option>
+          <option value="ops">ops</option>
+          <option value="owner">owner</option>
+        </select>
+      </div>
+      <div class="full">
+        <label class="label">Notes</label>
+        <textarea id="edit-notes"></textarea>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="ghost" onclick="closeEdit()">Cancel</button>
+      <button onclick="saveEdit()">Save</button>
     </div>
   </div>
 </div>
@@ -194,7 +351,9 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status });
+  if (!r.ok) {
+    throw Object.assign(new Error(data.error || r.statusText), { status: r.status });
+  }
   return data;
 }
 
@@ -209,20 +368,42 @@ function toast(message, kind = "ok", durationMs = 4000) {
   setTimeout(() => t.remove(), durationMs);
 }
 
-function showKeyOnce(user, key) {
-  const snippet = `claude mcp add --transport http dbt-sl ${MCP_URL} --header "Authorization: Bearer ${key}"`;
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const now = new Date();
+  const diffMs = now - d;
+  const diffHrs = diffMs / (1000 * 60 * 60);
+  if (diffHrs < 1) return `${Math.round(diffMs / 60000)}m ago`;
+  if (diffHrs < 24) return `${Math.round(diffHrs)}h ago`;
+  return d.toISOString().slice(0, 16).replace("T", " ");
+}
+
+function showTokenOnce(email, token, headline) {
+  const snippet = `claude mcp add --transport http dbt-sl ${MCP_URL} --header "Authorization: Bearer ${token}"`;
   const wrap = document.createElement("div");
   wrap.className = "toast warn";
   wrap.style.maxWidth = "640px";
   wrap.innerHTML = `
-    <strong>Key for ${user}</strong>
-    <p class="small" style="margin: 4px 0 8px">Save this now — it won't be shown again.</p>
-    <div class="key-display">${key}</div>
-    <p class="small" style="margin: 12px 0 4px">Connection one-liner to share with ${user}:</p>
-    <div id="connection-snippet">${snippet}</div>
+    <strong>${escapeHtml(headline || email)}</strong>
+    <p class="small" style="margin: 4px 0 8px">
+      Save this now — it won't be shown again. Token is valid against
+      <em>both</em> this MCP and vault-data /mcp.
+    </p>
+    <div class="key-display">${escapeHtml(token)}</div>
+    <p class="small" style="margin: 12px 0 4px">
+      Claude Code one-liner to share with the user:
+    </p>
+    <div id="connection-snippet">${escapeHtml(snippet)}</div>
     <div style="margin-top: 12px; text-align: right">
-      <button class="ghost" onclick="navigator.clipboard.writeText('${key}'); toast('Key copied', 'ok', 2000)">Copy key</button>
-      <button class="ghost" onclick="navigator.clipboard.writeText(\`${snippet}\`); toast('Snippet copied', 'ok', 2000)">Copy snippet</button>
+      <button class="ghost" onclick="navigator.clipboard.writeText(${JSON.stringify(token)}); toast('Token copied', 'ok', 2000)">Copy token</button>
+      <button class="ghost" onclick="navigator.clipboard.writeText(${JSON.stringify(snippet)}); toast('Snippet copied', 'ok', 2000)">Copy snippet</button>
       <button onclick="this.closest('.toast').remove()">Close</button>
     </div>`;
   document.body.appendChild(wrap);
@@ -230,21 +411,42 @@ function showKeyOnce(user, key) {
 
 async function refresh() {
   const tbody = document.getElementById("users-body");
+  const showRevoked = document.getElementById("show-revoked").checked;
   try {
     const { users } = await api("GET", "/admin/api/users");
-    if (!users || users.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" class="small">No users yet — add one above.</td></tr>`;
+    const filtered = showRevoked ? users : users.filter(u => u.active);
+    document.getElementById("user-count").innerText =
+      `${filtered.length} user${filtered.length === 1 ? "" : "s"}` +
+      (showRevoked ? "" : ` (+${users.length - filtered.length} revoked hidden)`);
+
+    if (!filtered.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="small">No users — add one above.</td></tr>`;
       return;
     }
-    tbody.innerHTML = users.map(u => `
+    tbody.innerHTML = filtered.map(u => `
       <tr>
-        <td><strong>${u.user}</strong></td>
-        <td class="mono">${u.key_prefix}</td>
-        <td>${u.calls}</td>
-        <td class="small">${u.last_seen || "never"}</td>
+        <td class="email">${escapeHtml(u.email)}</td>
+        <td>
+          ${escapeHtml(u.display_name || "—")}
+          <span class="badge role">${escapeHtml(u.role_label || "exec")}</span>
+        </td>
+        <td class="mono">${escapeHtml(u.token_prefix || "")}</td>
+        <td>
+          <span class="badge ${u.active ? "active" : "revoked"}">
+            ${u.active ? "active" : "revoked"}
+          </span>
+        </td>
+        <td class="small">${fmtDate(u.last_used_at)}</td>
+        <td class="small">${fmtDate(u.created_at)}</td>
         <td class="actions">
-          <button class="ghost" onclick="rotate('${u.user}')">Regenerate</button>
-          <button class="danger" onclick="del('${u.user}')">Delete</button>
+          ${u.active ? `
+            <button class="ghost" onclick="openEdit('${encodeURIComponent(u.email)}', ${JSON.stringify(u.display_name || "")}, '${escapeHtml(u.role_label || "exec")}', ${JSON.stringify(u.notes || "")})">Edit</button>
+            <button class="warn" onclick="regenerate('${encodeURIComponent(u.email)}')">Regenerate</button>
+            <button class="danger" onclick="revoke('${encodeURIComponent(u.email)}')">Revoke</button>
+          ` : `
+            <button class="ghost" onclick="reactivate('${encodeURIComponent(u.email)}')">Reactivate</button>
+            <button class="danger" onclick="hardDelete('${encodeURIComponent(u.email)}')">Hard delete</button>
+          `}
         </td>
       </tr>`).join("");
   } catch (e) {
@@ -254,40 +456,104 @@ async function refresh() {
       toast("Session expired — sign in again", "err");
       return;
     }
-    tbody.innerHTML = `<tr><td colspan="5" class="small" style="color: var(--danger)">${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="small" style="color: var(--danger)">${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
 async function addUser() {
-  const input = document.getElementById("new-user-name");
-  const name = input.value.trim();
-  if (!name) return;
+  const email = document.getElementById("new-email").value.trim();
+  const display_name = document.getElementById("new-name").value.trim();
+  const role_label = document.getElementById("new-role").value;
+  const notes = document.getElementById("new-notes").value.trim();
+  if (!email) { toast("Email is required", "err"); return; }
   try {
-    const { key } = await api("POST", "/admin/api/users", { name });
-    input.value = "";
-    showKeyOnce(name, key);
+    const { token } = await api("POST", "/admin/api/users", {
+      email, display_name, role_label, notes
+    });
+    document.getElementById("new-email").value = "";
+    document.getElementById("new-name").value = "";
+    document.getElementById("new-notes").value = "";
+    showTokenOnce(email, token, `Token for ${email}`);
     await refresh();
   } catch (e) {
     toast(e.message, "err");
   }
 }
 
-async function rotate(name) {
-  if (!confirm(`Regenerate key for "${name}"? The old key will stop working in ~30 seconds.`)) return;
+async function regenerate(emailEnc) {
+  const email = decodeURIComponent(emailEnc);
+  if (!confirm(`Regenerate token for ${email}? Old token stops working immediately.`)) return;
   try {
-    const { key } = await api("POST", `/admin/api/users/${encodeURIComponent(name)}/rotate`);
-    showKeyOnce(name, key);
+    const { token } = await api("POST", `/admin/api/users/${emailEnc}/regenerate`);
+    showTokenOnce(email, token, `New token for ${email}`);
     await refresh();
   } catch (e) {
     toast(e.message, "err");
   }
 }
 
-async function del(name) {
-  if (!confirm(`Delete user "${name}"? Their key will stop working in ~30 seconds.`)) return;
+async function revoke(emailEnc) {
+  const email = decodeURIComponent(emailEnc);
+  if (!confirm(`Revoke ${email}? Their token will stop working immediately. (Soft delete — row preserved.)`)) return;
   try {
-    await api("DELETE", `/admin/api/users/${encodeURIComponent(name)}`);
-    toast(`Deleted ${name}`, "ok");
+    await api("POST", `/admin/api/users/${emailEnc}/revoke`);
+    toast(`Revoked ${escapeHtml(email)}`, "ok");
+    await refresh();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+async function reactivate(emailEnc) {
+  const email = decodeURIComponent(emailEnc);
+  if (!confirm(`Reactivate ${email}? A new token will be generated (old one is discarded as compromised).`)) return;
+  try {
+    const { token } = await api("POST", `/admin/api/users/${emailEnc}/reactivate`);
+    showTokenOnce(email, token, `Reactivated ${email}`);
+    await refresh();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+async function hardDelete(emailEnc) {
+  const email = decodeURIComponent(emailEnc);
+  if (!confirm(`HARD DELETE ${email}? This removes the row entirely and loses audit history. Are you sure?`)) return;
+  if (!confirm(`Really? Type-confirmation would be safer, but: are you sure about ${email}?`)) return;
+  try {
+    await api("DELETE", `/admin/api/users/${emailEnc}`);
+    toast(`Deleted ${escapeHtml(email)}`, "ok");
+    await refresh();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+function openEdit(emailEnc, displayName, role, notes) {
+  document.getElementById("edit-email-hidden").value = emailEnc;
+  document.getElementById("edit-email-display").innerText =
+    "Editing " + decodeURIComponent(emailEnc);
+  document.getElementById("edit-name").value = displayName || "";
+  document.getElementById("edit-role").value = role || "exec";
+  document.getElementById("edit-notes").value = notes || "";
+  document.getElementById("edit-modal-bg").classList.add("open");
+}
+
+function closeEdit() {
+  document.getElementById("edit-modal-bg").classList.remove("open");
+}
+
+async function saveEdit() {
+  const emailEnc = document.getElementById("edit-email-hidden").value;
+  const body = {
+    display_name: document.getElementById("edit-name").value.trim(),
+    role_label: document.getElementById("edit-role").value,
+    notes: document.getElementById("edit-notes").value.trim(),
+  };
+  try {
+    await api("PATCH", `/admin/api/users/${emailEnc}`, body);
+    toast(`Updated ${escapeHtml(decodeURIComponent(emailEnc))}`, "ok");
+    closeEdit();
     await refresh();
   } catch (e) {
     toast(e.message, "err");
