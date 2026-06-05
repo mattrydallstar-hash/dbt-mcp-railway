@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 # Pin the version we tested against. Bump as new dbt-mcp releases drop.
 # psycopg2-binary backs the PostgresTokenVerifier (auth) + the admin
 # Postgres CRUD on vault-data's mcp_user_tokens table.
-RUN pip install --no-cache-dir 'dbt-mcp==1.19.1' 'psycopg2-binary>=2.9,<3'
+RUN pip install --no-cache-dir 'dbt-mcp==1.20.1' 'psycopg2-binary>=2.9,<3'
 
 # Wrapper that monkey-patches FastMCP.__init__ to honor FASTMCP_HOST /
 # FASTMCP_PORT env vars (the SDK currently ignores them on construction,
